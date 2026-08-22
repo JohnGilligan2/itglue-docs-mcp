@@ -1,0 +1,11 @@
+# itglue-mcp runtime dependencies
+# FastMCP 3.x ships the Azure/Entra resource-server provider (AzureJWTVerifier),
+# RemoteAuthProvider, and the get_access_token dependency. Same pin as
+# notify-mcp and odoo-ticket-mcp; re-verify the dependency API on upgrade.
+fastmcp==3.4.5
+pydantic>=2.7
+
+# Everything else (HTTP, HTML stripping, fuzzy matching) uses the stdlib —
+# urllib.request, html, re, difflib. Deliberately no requests/bs4/rapidfuzz:
+# the corpus is small and fewer dependencies means less to audit on a server
+# that holds an IT Glue key with write rights.

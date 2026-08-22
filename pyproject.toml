@@ -1,0 +1,16 @@
+[project]
+name = "itglue-mcp"
+version = "0.1.0"
+description = "Read-only MCP server over the IT Glue documentation API (never returns credential values)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.4,<4",
+    "pydantic>=2.7",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["itglue_mcp"]

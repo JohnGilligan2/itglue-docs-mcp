@@ -1,0 +1,181 @@
+# =============================================================================
+# Portainer stack — itglue-mcp
+#
+# Stack name:  itglue-mcp
+# Host:        10.0.0.10   Host port: 8111  ->  container 8000
+# Public:      https://itglue-mcp.example.com   (via Nginx Proxy Manager)
+# Entra:       examplecorp.com tenant 00000000-0000-0000-0000-000000000000
+#
+# THE ONLY REQUIRED PORTAINER STACK ENVIRONMENT VARIABLE:
+#
+#     ITGLUE_API_KEY = <the IT Glue key>
+#
+# Everything else carries a real default in the ${VAR:-default} form below, so
+# the stack deploys with just that one variable — but every value can still be
+# overridden per-environment without editing this file.
+#
+# Values come from scripts/setup_entra_app.ps1, run 2026-07-29. Tenant and client
+# IDs are NOT secrets and are safe to commit. The client SECRET is not here and
+# never should be: this server runs in resource-server mode (it only VALIDATES
+# tokens, never issues them), so it has no use for the secret — that goes into
+# Claude's connector Advanced settings.
+#
+# SECURITY NOTE: ITGLUE_API_KEY has full write AND delete rights in IT Glue
+# (verified — PATCH/DELETE on a bogus id return 404, not 403). The read-only
+# guarantee is enforced in code, not by the key. See README.md §1.
+#
+# Playbook gotcha this file exists to avoid: a var the code reads but that is
+# absent here falls back to the CODE default silently — or, for a required one,
+# crashes the container at startup with a ConfigError. Keep this list complete.
+# =============================================================================
+
+services:
+  itglue-mcp:
+    build: .
+    image: itglue-mcp:latest
+    # Build locally from the Dockerfile; never try to PULL this image. Without
+    # pull_policy, a Portainer standalone redeploy attempts a registry pull and
+    # fails with "pull access denied" (learned on o365logs-mcp).
+    pull_policy: build
+    container_name: itglue-mcp
+    restart: unless-stopped
+
+    environment:
+      # --- telemetry (mcp-telemetry-kit) ---
+      # Feeds the "MCP servers - usage and token cost" Grafana dashboard. The
+      # bearer token lives ONLY in the Portainer stack env, never in git.
+      MCP_TELEMETRY_ENABLED: "${MCP_TELEMETRY_ENABLED:-true}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-itglue-mcp}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://10.0.0.10:4318}"
+      OTEL_EXPORTER_OTLP_HEADERS: "${OTEL_EXPORTER_OTLP_HEADERS}"
+
+      # ---------------------------------------------------------------- Entra
+      MCP_AUTH_ENABLED: ${MCP_AUTH_ENABLED:-true}
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-00000000-0000-0000-0000-000000000000}
+      ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+      # MUST be the exact /mcp URL, matching the app's Application ID URI, or
+      # sign-in fails with AADSTS9010010.
+      ENTRA_IDENTIFIER_URI: ${ENTRA_IDENTIFIER_URI:-https://itglue-mcp.example.com/mcp}
+      MCP_BASE_URL: ${MCP_BASE_URL:-https://itglue-mcp.example.com}
+      ENTRA_SCOPE_NAME: ${ENTRA_SCOPE_NAME:-access_as_user}
+      ENTRA_REQUIRED_SCOPES: ${ENTRA_REQUIRED_SCOPES:-access_as_user}
+      # Advertise offline_access so Claude obtains a REFRESH token and renews
+      # silently. Pairs with the 23h59m access-token lifetime policy: the long
+      # token means fewer renewals, the refresh token means none of them prompt.
+      # Without this the connector shows "disconnected" at token expiry.
+      ITGLUE_ADVERTISE_OFFLINE_ACCESS: ${ITGLUE_ADVERTISE_OFFLINE_ACCESS:-true}
+
+      # -------------------------------------------------------------- IT Glue
+      # No default on purpose — the container SHOULD fail fast if this is unset
+      # rather than start up unable to answer anything.
+      ITGLUE_API_KEY: ${ITGLUE_API_KEY}
+      ITGLUE_BASE_URL: ${ITGLUE_BASE_URL:-https://api.itglue.com}
+      # Builds the human-clickable deep links that are the point of the
+      # credential tool. Must match the tenant the API key belongs to.
+      ITGLUE_SUBDOMAIN_URL: ${ITGLUE_SUBDOMAIN_URL:-https://your-company.itglue.com}
+      ITGLUE_TIMEOUT: ${ITGLUE_TIMEOUT:-40}
+      ITGLUE_SYNC_DELAY: ${ITGLUE_SYNC_DELAY:-0.05}
+
+      # --------------------------------------------------------------- Safety
+      # Password VALUES and password NOTES are never returned at any setting and
+      # are not configurable. This only controls the USERNAME field, which is
+      # half a credential — leave false unless the team decides otherwise.
+      ITGLUE_INCLUDE_USERNAME: ${ITGLUE_INCLUDE_USERNAME:-false}
+      # Drop records IT Glue itself marks restricted (limited visibility).
+      ITGLUE_HONOR_RESTRICTED: ${ITGLUE_HONOR_RESTRICTED:-true}
+      # Archived records are stale by definition; excluded from search.
+      ITGLUE_INCLUDE_ARCHIVED: ${ITGLUE_INCLUDE_ARCHIVED:-false}
+
+      # --------------------------------------------------------- Local mirror
+      # Required, not an optimisation: IT Glue's filter[name] is exact-match
+      # only, so substring/fuzzy search must run locally. In RAM, no volume.
+      ITGLUE_CORE_TTL: ${ITGLUE_CORE_TTL:-21600}          # 6h  — ~7k records, ~10 calls
+      ITGLUE_DOCS_TTL: ${ITGLUE_DOCS_TTL:-86400}          # 24h — ~300 docs, ~400 calls
+      ITGLUE_WARM_DOCS_ON_START: ${ITGLUE_WARM_DOCS_ON_START:-true}
+      ITGLUE_MAX_RESULTS: ${ITGLUE_MAX_RESULTS:-25}
+
+      # ------------------------------------------------------------- Listener
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+
+    ports:
+      # 8111 probed FREE on 10.0.0.10 on 2026-07-29 (only 8100 and 8110 were
+      # in use across 8100-8130). Re-probe before deploy: ss -tlnp | grep 8111
+      - "${MCP_HOST_PORT:-8111}:8000"
+
+    # No volumes. The mirror is in-memory and rebuilt on start, so there is no
+    # stale-cache-on-disk failure mode and nothing to migrate on rollback.
+
+    healthcheck:
+      # /healthz is unauthenticated by design and reports index freshness plus
+      # the safety posture — no customer data.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status==200 else sys.exit(1)"]
+      interval: 60s
+      timeout: 10s
+      # The container is healthy in seconds, but the DOCUMENT index takes a few
+      # minutes to build in the background (~400 IT Glue calls). Structured
+      # tools work at once; document tools report status "indexing" until ready.
+      start_period: 30s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Service-to-service twin, for the network-expert agent ─────────────
+  # Same image and code as the public server, same IT Glue key, same
+  # read-only guarantees. Two differences: MCP_AUTH_ENABLED=false, and no
+  # published port.
+  #
+  # !! DO NOT ADD A `ports:` MAPPING TO THIS SERVICE. !!
+  # Like voip-switch-mcp and unlike o365logs-mcp, this server has no bearer
+  # mode — auth is all-or-nothing — so the private network is the ONLY
+  # boundary. A published port would put an unauthenticated reader of every
+  # customer's documentation on the LAN.
+  #
+  # Consumed by:  examplecorpmunications/network-expert-agent
+  itglue-mcp-internal:
+    build: .
+    image: itglue-mcp:latest
+    pull_policy: build
+    container_name: itglue-mcp-internal
+    restart: unless-stopped
+    environment:
+      MCP_AUTH_ENABLED: "false"
+      ITGLUE_API_KEY: ${ITGLUE_API_KEY}
+      ITGLUE_BASE_URL: ${ITGLUE_BASE_URL:-https://api.itglue.com}
+      ITGLUE_SUBDOMAIN_URL: ${ITGLUE_SUBDOMAIN_URL:-https://your-company.itglue.com}
+      ITGLUE_TIMEOUT: ${ITGLUE_TIMEOUT:-40}
+      ITGLUE_SYNC_DELAY: ${ITGLUE_SYNC_DELAY:-0.05}
+      # Safety posture matches the public server; the agent's allowlist
+      # additionally withholds itglue_find_credential entirely.
+      ITGLUE_INCLUDE_USERNAME: ${ITGLUE_INCLUDE_USERNAME:-false}
+      ITGLUE_HONOR_RESTRICTED: ${ITGLUE_HONOR_RESTRICTED:-true}
+      ITGLUE_INCLUDE_ARCHIVED: ${ITGLUE_INCLUDE_ARCHIVED:-false}
+      ITGLUE_CORE_TTL: ${ITGLUE_CORE_TTL:-21600}
+      ITGLUE_DOCS_TTL: ${ITGLUE_DOCS_TTL:-86400}
+      ITGLUE_WARM_DOCS_ON_START: ${ITGLUE_WARM_DOCS_ON_START:-true}
+      ITGLUE_MAX_RESULTS: ${ITGLUE_MAX_RESULTS:-25}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+    networks: [mcp-internal, default]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status==200 else sys.exit(1)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  # Shared with the network-expert agent stack. `name:` without
+  # `external: true` so a missing network cannot fail the deploy of the
+  # live public server.
+  mcp-internal:
+    name: mcp-internal
